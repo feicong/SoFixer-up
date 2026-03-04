@@ -722,6 +722,24 @@ bool ElfRebuilder::ReadSoInfo() {
     bool has_strtab = false;
     Elf_Addr symtab_addr = 0;
     bool has_symtab = false;
+    Elf_Addr rel_addr = 0;
+    bool has_rel = false;
+    Elf_Addr rela_addr = 0;
+    bool has_rela = false;
+    Elf_Addr jmprel_addr = 0;
+    bool has_jmprel = false;
+    Elf_Addr pltgot_addr = 0;
+    bool has_pltgot = false;
+    Elf_Addr init_addr = 0;
+    bool has_init = false;
+    Elf_Addr fini_addr = 0;
+    bool has_fini = false;
+    Elf_Addr init_array_addr = 0;
+    bool has_init_array = false;
+    Elf_Addr fini_array_addr = 0;
+    bool has_fini_array = false;
+    Elf_Addr preinit_array_addr = 0;
+    bool has_preinit_array = false;
     Elf_Word soname_off = 0;
     bool has_soname = false;
     for (size_t dyn_idx = 0; dyn_idx < si.dynamic_count; ++dyn_idx) {
@@ -768,14 +786,16 @@ bool ElfRebuilder::ReadSoInfo() {
                 si.plt_type = d->d_un.d_val;
                 break;
             case DT_JMPREL:
-                si.plt_rel = (Elf_Rel*) (base + d->d_un.d_ptr);
+                jmprel_addr = d->d_un.d_ptr;
+                has_jmprel = true;
                 FLOGD("%s plt_rel (DT_JMPREL) found at %" ADDRESS_FORMAT "x", si.name, d->d_un.d_ptr);
                 break;
             case DT_PLTRELSZ:
                 plt_rel_size_bytes = d->d_un.d_val;
                 break;
             case DT_REL:
-                si.rel = (Elf_Rel*) (base + d->d_un.d_ptr);
+                rel_addr = d->d_un.d_ptr;
+                has_rel = true;
                 FLOGD("%s rel (DT_REL) found at %" ADDRESS_FORMAT "x", si.name, d->d_un.d_ptr);
                 break;
             case DT_RELSZ:
@@ -784,28 +804,33 @@ bool ElfRebuilder::ReadSoInfo() {
                 break;
             case DT_PLTGOT:
                 /* Save this in case we decide to do lazy binding. We don't yet. */
-                si.plt_got = (Elf_Addr *)(base + d->d_un.d_ptr);
+                pltgot_addr = d->d_un.d_ptr;
+                has_pltgot = true;
                 break;
             case DT_DEBUG:
                 // Set the DT_DEBUG entry to the address of _r_debug for GDB
                 // if the dynamic table is writable
                 break;
             case DT_RELA:
-                si.plt_rela = (Elf_Rela*)(base + d->d_un.d_ptr);
+                rela_addr = d->d_un.d_ptr;
+                has_rela = true;
                 break;
             case DT_RELASZ:
                 si.plt_rela_count = d->d_un.d_val / sizeof(Elf_Rela);
                 break;
             case DT_INIT:
-                si.init_func = reinterpret_cast<void*>(base + d->d_un.d_ptr);
+                init_addr = d->d_un.d_ptr;
+                has_init = true;
                 FLOGD("%s constructors (DT_INIT) found at %" ADDRESS_FORMAT "x", si.name, d->d_un.d_ptr);
                 break;
             case DT_FINI:
-                si.fini_func = reinterpret_cast<void*>(base + d->d_un.d_ptr);
+                fini_addr = d->d_un.d_ptr;
+                has_fini = true;
                 FLOGD("%s destructors (DT_FINI) found at %" ADDRESS_FORMAT "x", si.name, d->d_un.d_ptr);
                 break;
             case DT_INIT_ARRAY:
-                si.init_array = reinterpret_cast<void**>(base + d->d_un.d_ptr);
+                init_array_addr = d->d_un.d_ptr;
+                has_init_array = true;
                 FLOGD("%s constructors (DT_INIT_ARRAY) found at %" ADDRESS_FORMAT "x", si.name, d->d_un.d_ptr);
                 break;
             case DT_INIT_ARRAYSZ:
@@ -813,7 +838,8 @@ bool ElfRebuilder::ReadSoInfo() {
                 FLOGD("%s constructors (DT_INIT_ARRAYSZ) %zu", si.name, si.init_array_count);
                 break;
             case DT_FINI_ARRAY:
-                si.fini_array = reinterpret_cast<void**>(base + d->d_un.d_ptr);
+                fini_array_addr = d->d_un.d_ptr;
+                has_fini_array = true;
                 FLOGD("%s destructors (DT_FINI_ARRAY) found at %" ADDRESS_FORMAT "x", si.name, d->d_un.d_ptr);
                 break;
             case DT_FINI_ARRAYSZ:
@@ -821,7 +847,8 @@ bool ElfRebuilder::ReadSoInfo() {
                 FLOGD("%s destructors (DT_FINI_ARRAYSZ) %zu", si.name, si.fini_array_count);
                 break;
             case DT_PREINIT_ARRAY:
-                si.preinit_array = reinterpret_cast<void**>(base + d->d_un.d_ptr);
+                preinit_array_addr = d->d_un.d_ptr;
+                has_preinit_array = true;
                 FLOGD("%s constructors (DT_PREINIT_ARRAY) found at %" ADDRESS_FORMAT "x", si.name, d->d_un.d_ptr);
                 break;
             case DT_PREINIT_ARRAYSZ:
@@ -899,6 +926,63 @@ bool ElfRebuilder::ReadSoInfo() {
         }
         si.symtab = reinterpret_cast<Elf_Sym*>(base + symtab_addr);
     }
+    if (has_pltgot) {
+        if (!RangeInLoad(pltgot_addr, static_cast<Elf_Addr>(sizeof(Elf_Addr)), si.min_load, si.max_load)) {
+            FLOGE("Invalid DT_PLTGOT pointer");
+            return false;
+        }
+        si.plt_got = reinterpret_cast<Elf_Addr*>(base + pltgot_addr);
+    }
+    if (has_init) {
+        if (!RangeInLoad(init_addr, 1, si.min_load, si.max_load)) {
+            FLOGE("Invalid DT_INIT pointer");
+            return false;
+        }
+        si.init_func = reinterpret_cast<void*>(base + init_addr);
+    }
+    if (has_fini) {
+        if (!RangeInLoad(fini_addr, 1, si.min_load, si.max_load)) {
+            FLOGE("Invalid DT_FINI pointer");
+            return false;
+        }
+        si.fini_func = reinterpret_cast<void*>(base + fini_addr);
+    }
+    if (has_init_array) {
+        Elf_Addr init_array_bytes = 0;
+        if (!CountToBytes(si.init_array_count, sizeof(Elf_Addr), &init_array_bytes)) {
+            FLOGE("Invalid DT_INIT_ARRAY size");
+            return false;
+        }
+        if (!RangeInLoad(init_array_addr, init_array_bytes, si.min_load, si.max_load)) {
+            FLOGE("Invalid DT_INIT_ARRAY range");
+            return false;
+        }
+        si.init_array = reinterpret_cast<void**>(base + init_array_addr);
+    }
+    if (has_fini_array) {
+        Elf_Addr fini_array_bytes = 0;
+        if (!CountToBytes(si.fini_array_count, sizeof(Elf_Addr), &fini_array_bytes)) {
+            FLOGE("Invalid DT_FINI_ARRAY size");
+            return false;
+        }
+        if (!RangeInLoad(fini_array_addr, fini_array_bytes, si.min_load, si.max_load)) {
+            FLOGE("Invalid DT_FINI_ARRAY range");
+            return false;
+        }
+        si.fini_array = reinterpret_cast<void**>(base + fini_array_addr);
+    }
+    if (has_preinit_array) {
+        Elf_Addr preinit_array_bytes = 0;
+        if (!CountToBytes(si.preinit_array_count, sizeof(Elf_Addr), &preinit_array_bytes)) {
+            FLOGE("Invalid DT_PREINIT_ARRAY size");
+            return false;
+        }
+        if (!RangeInLoad(preinit_array_addr, preinit_array_bytes, si.min_load, si.max_load)) {
+            FLOGE("Invalid DT_PREINIT_ARRAY range");
+            return false;
+        }
+        si.preinit_array = reinterpret_cast<void**>(base + preinit_array_addr);
+    }
     if (has_soname) {
         if (StringOffsetValid(si.strtab, si.strtabsize, soname_off)) {
             si.name = si.strtab + soname_off;
@@ -919,31 +1003,45 @@ bool ElfRebuilder::ReadSoInfo() {
         FLOGD("%s plt_rel_count (DT_PLTRELSZ) %zu", si.name, si.plt_rel_count);
     }
     if (si.rel_count != 0) {
-        if (si.rel == nullptr) {
+        if (!has_rel) {
             FLOGE("DT_RELSZ found but DT_REL missing");
             return false;
         }
         Elf_Addr rel_bytes = 0;
         if (!CountToBytes(si.rel_count, sizeof(Elf_Rel), &rel_bytes) ||
-            !PointerInLoad(base, si.rel, rel_bytes, si.min_load, si.max_load)) {
+            !RangeInLoad(rel_addr, rel_bytes, si.min_load, si.max_load)) {
             FLOGE("Invalid DT_REL range");
             return false;
         }
+        si.rel = reinterpret_cast<Elf_Rel*>(base + rel_addr);
+    } else if (has_rel) {
+        if (!RangeInLoad(rel_addr, static_cast<Elf_Addr>(sizeof(Elf_Rel)), si.min_load, si.max_load)) {
+            FLOGE("Invalid DT_REL pointer");
+            return false;
+        }
+        si.rel = reinterpret_cast<Elf_Rel*>(base + rel_addr);
     }
     if (si.plt_rela_count != 0) {
-        if (si.plt_rela == nullptr) {
+        if (!has_rela) {
             FLOGE("DT_RELASZ found but DT_RELA missing");
             return false;
         }
         Elf_Addr rela_bytes = 0;
         if (!CountToBytes(si.plt_rela_count, sizeof(Elf_Rela), &rela_bytes) ||
-            !PointerInLoad(base, si.plt_rela, rela_bytes, si.min_load, si.max_load)) {
+            !RangeInLoad(rela_addr, rela_bytes, si.min_load, si.max_load)) {
             FLOGE("Invalid DT_RELA range");
             return false;
         }
+        si.plt_rela = reinterpret_cast<Elf_Rela*>(base + rela_addr);
+    } else if (has_rela) {
+        if (!RangeInLoad(rela_addr, static_cast<Elf_Addr>(sizeof(Elf_Rela)), si.min_load, si.max_load)) {
+            FLOGE("Invalid DT_RELA pointer");
+            return false;
+        }
+        si.plt_rela = reinterpret_cast<Elf_Rela*>(base + rela_addr);
     }
     if (si.plt_rel_count != 0) {
-        if (si.plt_rel == nullptr) {
+        if (!has_jmprel) {
             FLOGE("DT_PLTRELSZ found but DT_JMPREL missing");
             return false;
         }
@@ -958,10 +1056,17 @@ bool ElfRebuilder::ReadSoInfo() {
         }
         Elf_Addr plt_bytes = 0;
         if (!CountToBytes(si.plt_rel_count, plt_ent_size, &plt_bytes) ||
-            !PointerInLoad(base, si.plt_rel, plt_bytes, si.min_load, si.max_load)) {
+            !RangeInLoad(jmprel_addr, plt_bytes, si.min_load, si.max_load)) {
             FLOGE("Invalid DT_JMPREL range");
             return false;
         }
+        si.plt_rel = reinterpret_cast<Elf_Rel*>(base + jmprel_addr);
+    } else if (has_jmprel) {
+        if (!RangeInLoad(jmprel_addr, static_cast<Elf_Addr>(sizeof(Elf_Rel)), si.min_load, si.max_load)) {
+            FLOGE("Invalid DT_JMPREL pointer");
+            return false;
+        }
+        si.plt_rel = reinterpret_cast<Elf_Rel*>(base + jmprel_addr);
     }
     (void)needed_count;
     FLOGD("=======================ReadSoInfo End=========================");
