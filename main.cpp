@@ -6,6 +6,7 @@
 #include <cstring>
 #include <cstdlib>
 
+// 文件功能：命令行入口，负责参数解析、调用读取器与重建器并输出结果文件。
 #ifdef __SO64__
 #define TARGET_NAME "SoFixer64"
 #else
@@ -13,8 +14,10 @@
 #endif
 
 
+// 打印帮助信息
 void useage();
 
+// 判断字符串是否应按16进制解析
 static bool is16Bit(const char* value) {
     if (value == nullptr || *value == '\0') {
         return false;
@@ -32,6 +35,7 @@ static bool is16Bit(const char* value) {
     return false;
 }
 
+// 解析形如--key=value的长参数
 static bool matchLongOption(const std::string& arg, const char* name, std::string& value) {
     std::string prefix(name);
     prefix += "=";
@@ -42,10 +46,12 @@ static bool matchLongOption(const std::string& arg, const char* name, std::strin
     return false;
 }
 
+// 主业务流程：解析参数->加载so->重建->输出文件
 bool main_loop(int argc, char* argv[]) {
     ObElfReader elf_reader;
 
     std::string source, output, baseso;
+    // 命令行参数解析
     for (int i = 1; i < argc; i++) {
         std::string arg = argv[i];
         if (arg == "-d" || arg == "--debug") {
@@ -109,6 +115,7 @@ bool main_loop(int argc, char* argv[]) {
     }
 
     FLOGI("start to rebuild elf file");
+    // 加载输入so
     if (!elf_reader.setSource(source.c_str())) {
         FLOGE("unable to open source file");
         return false;
@@ -122,6 +129,7 @@ bool main_loop(int argc, char* argv[]) {
         return false;
     }
 
+    // 执行重建流程
     ElfRebuilder elf_rebuilder(&elf_reader);
     if(!elf_rebuilder.Rebuild()) {
         FLOGE("error occured in rebuilding elf file");
@@ -129,6 +137,7 @@ bool main_loop(int argc, char* argv[]) {
     }
 
     if (!output.empty()) {
+        // 把重建结果写入输出文件
         auto* file = fopen(output.c_str(), "wb+");
         if(nullptr == file) {
             FLOGE("output so file cannot write !!!");
@@ -141,6 +150,7 @@ bool main_loop(int argc, char* argv[]) {
     return true;
 }
 
+// 进程入口：成功返回0，失败返回-1并打印帮助
 int main(int argc, char* argv[]) {
     if (main_loop(argc, argv)) {
         FLOGI("Done!!!");
@@ -150,6 +160,7 @@ int main(int argc, char* argv[]) {
     return -1;
 }
 
+// 打印命令行使用说明
 void useage() {
     FLOGI(TARGET_NAME "v2.1 author F8LEFT(currwin)");
     FLOGI("Useage: SoFixer <option(s)> -s sourcefile -o generatefile");

@@ -5,6 +5,7 @@
 //===----------------------------------------------------------------------===//
 //
 //===----------------------------------------------------------------------===//
+// 文件功能：实现ELF读取、段装载、动态段定位与程序头有效性校验。
 
 #include "ElfReader.h"
 #include "elf.h"
@@ -18,6 +19,7 @@
 #include <errno.h>
 #include <vector>
 
+// 说明：下面保留原始英文技术说明，同时补充中文注释，方便快速理解加载模型。
 /**
   TECHNICAL NOTE ON ELF LOADING.
 
@@ -99,6 +101,7 @@
 #define PFLAGS_TO_PROT(x)            (MAYBE_MAP_FLAG((x), PF_X, PROT_EXEC) | \
                                       MAYBE_MAP_FLAG((x), PF_R, PROT_READ) | \
                                       MAYBE_MAP_FLAG((x), PF_W, PROT_WRITE))
+// 构造函数：仅初始化成员，实际加载在Load中完成
 ElfReader::ElfReader()
         : source_(nullptr), name_(nullptr),
           phdr_num_(0), phdr_mmap_(NULL), phdr_table_(NULL), phdr_size_(0),
@@ -106,6 +109,7 @@ ElfReader::ElfReader()
           loaded_phdr_(NULL) {
 }
 
+// 析构函数：统一释放文件和内存资源
 ElfReader::~ElfReader() {
     if (phdr_mmap_ != NULL) {
         delete [](uint8_t*)phdr_mmap_;
@@ -118,6 +122,7 @@ ElfReader::~ElfReader() {
     }
 }
 
+// 对外主入口：按顺序执行读取、校验、装载和phdr定位
 bool ElfReader::Load() {
     // try open
     return ReadElfHeader() &&
@@ -129,6 +134,7 @@ bool ElfReader::Load() {
            FindPhdr();
 }
 
+// 读取ELF头到header_缓存
 bool ElfReader::ReadElfHeader() {
     auto rc = source_->Read(&header_, sizeof(header_));
     if (rc != sizeof(header_)) {
@@ -138,6 +144,7 @@ bool ElfReader::ReadElfHeader() {
     return true;
 }
 
+// 校验ELF基础合法性，避免后续解析在非法输入上继续执行
 bool ElfReader::VerifyElfHeader() {
     if (header_.e_ident[EI_MAG0] != ELFMAG0 ||
         header_.e_ident[EI_MAG1] != ELFMAG1 ||
@@ -178,6 +185,7 @@ bool ElfReader::VerifyElfHeader() {
 
 // Loads the program header table from an ELF file into a read-only private
 // anonymous mmap-ed block.
+// 读取程序头表并保存到本地缓冲，后续逻辑都基于此缓冲
 bool ElfReader::ReadProgramHeader() {
     phdr_num_ = header_.e_phnum;
 
@@ -218,6 +226,8 @@ size_t phdr_table_get_load_size(const Elf_Phdr* phdr_table,
                                 Elf_Addr* out_min_vaddr,
                                 Elf_Addr* out_max_vaddr)
 {
+    // 计算所有PT_LOAD段的页对齐覆盖范围，返回总映射长度
+    // 安全加法：统一处理地址运算溢出
     auto safe_add = [](Elf_Addr lhs, Elf_Addr rhs, Elf_Addr* out) -> bool {
         if (lhs > std::numeric_limits<Elf_Addr>::max() - rhs) {
             return false;
@@ -240,6 +250,9 @@ size_t phdr_table_get_load_size(const Elf_Phdr* phdr_table,
             continue;
         }
         found_pt_load = true;
+        if (phdr->p_filesz > phdr->p_memsz) {
+            return 0;
+        }
 
         if (phdr->p_vaddr < min_vaddr) {
             min_vaddr = phdr->p_vaddr;
@@ -278,6 +291,7 @@ size_t phdr_table_get_load_size(const Elf_Phdr* phdr_table,
 // Reserve a virtual address range big enough to hold all loadable
 // segments of a program header table. This is done by creating a
 // private anonymous mmap() with PROT_NONE.
+// 预留一块连续缓冲用于承载所有加载段和可选padding
 bool ElfReader::ReserveAddressSpace(uint32_t padding_size) {
     Elf_Addr min_vaddr;
     load_size_ = phdr_table_get_load_size(phdr_table_, phdr_num_, &min_vaddr);
@@ -319,6 +333,7 @@ bool ElfReader::ReserveAddressSpace(uint32_t padding_size) {
 // This assumes you already called phdr_table_reserve_memory to
 // reserve the address space range for the library.
 // TODO: assert assumption.
+// 将每个PT_LOAD段复制到预留缓冲对应偏移处
 bool ElfReader::LoadSegments() {
     // TODO fix file dada load error, file data between LOAD seg should be loaded
     for (size_t i = 0; i < phdr_num_; ++i) {
@@ -344,8 +359,13 @@ bool ElfReader::LoadSegments() {
             FLOGE("\"%s\" invalid segment file range at phdr %zu", name_, i);
             return false;
         }
+        if (phdr->p_filesz > phdr->p_memsz) {
+            FLOGE("\"%s\" p_filesz > p_memsz at phdr %zu", name_, i);
+            return false;
+        }
 
         // File offsets.
+        // 校验文件区间，避免偏移回绕
         Elf_Addr file_start = phdr->p_offset;
         Elf_Addr file_end = file_start + phdr->p_filesz;
         if (file_end < file_start) {
@@ -399,6 +419,7 @@ _phdr_table_set_load_prot(const Elf_Phdr* phdr_table,
                           uint8_t *load_bias,
                           int               extra_prot_flags)
 {
+    // 当前项目不实际调用mprotect，此处保留接口和段遍历逻辑
     const Elf_Phdr* phdr = phdr_table;
     const Elf_Phdr* phdr_limit = phdr + phdr_count;
 
@@ -437,6 +458,8 @@ phdr_table_protect_segments(const Elf_Phdr* phdr_table,
                             int               phdr_count,
                             uint8_t *load_bias)
 {
+    // 对外接口：恢复段保护（当前为保留实现）
+    // 当前实现等价于遍历检查，便于后续扩展真实保护逻辑
     return _phdr_table_set_load_prot(phdr_table, phdr_count,
                                      load_bias, 0);
 }
@@ -462,6 +485,8 @@ phdr_table_unprotect_segments(const Elf_Phdr* phdr_table,
                               int               phdr_count,
                               uint8_t *load_bias)
 {
+    // 对外接口：放宽段保护（当前为保留实现）
+    // 预留可写保护接口，当前未启用真实mprotect
     return _phdr_table_set_load_prot(phdr_table, phdr_count,
                                      load_bias, /*PROT_WRITE*/0);
 }
@@ -475,6 +500,7 @@ _phdr_table_set_gnu_relro_prot(const Elf_Phdr* phdr_table,
                                uint8_t *load_bias,
                                int               prot_flags)
 {
+    // 当前只保留遍历框架，便于后续补齐RELRO真实保护
     const Elf_Phdr* phdr = phdr_table;
     const Elf_Phdr* phdr_limit = phdr + phdr_count;
 
@@ -534,6 +560,8 @@ phdr_table_protect_gnu_relro(const Elf_Phdr* phdr_table,
                              int               phdr_count,
                              uint8_t *load_bias)
 {
+    // 对外接口：处理GNU RELRO保护（当前为保留实现）
+    // 对外RELRO保护入口
     return _phdr_table_set_gnu_relro_prot(phdr_table,
                                           phdr_count,
                                           load_bias,
@@ -565,6 +593,8 @@ phdr_table_get_arm_exidx(const Elf_Phdr* phdr_table,
                          Elf_Addr**      arm_exidx,
                          unsigned*         arm_exidx_count)
 {
+    // 对外接口：返回ARM异常回溯段地址及条目数量
+    // 从程序头中查找ARM异常回溯表
     const Elf_Phdr* phdr = phdr_table;
     const Elf_Phdr* phdr_limit = phdr + phdr_count;
 
@@ -603,6 +633,8 @@ phdr_table_get_dynamic_section(const Elf_Phdr* phdr_table,
                                size_t*           dynamic_count,
                                Elf_Word*       dynamic_flags)
 {
+    // 对外接口：从程序头中提取动态段信息
+    // 动态段必须完全落在某个PT_LOAD范围内
     auto range_in_load = [phdr_table, phdr_count](Elf_Addr start, Elf_Addr size) -> bool {
         if (size == 0) {
             return false;
@@ -660,6 +692,7 @@ phdr_table_get_dynamic_section(const Elf_Phdr* phdr_table,
 // Returns the address of the program header table as it appears in the loaded
 // segments in memory. This is in contrast with 'phdr_table_' which
 // is temporary and will be released before the library is relocated.
+// 在已加载镜像中定位程序头表入口，优先PT_PHDR，兜底首个PT_LOAD+e_phoff。
 bool ElfReader::FindPhdr() {
     const Elf_Phdr* phdr_limit = phdr_table_ + phdr_num_;
 
@@ -676,6 +709,7 @@ bool ElfReader::FindPhdr() {
     for (const Elf_Phdr* phdr = phdr_table_; phdr < phdr_limit; ++phdr) {
         if (phdr->p_type == PT_LOAD) {
             if (phdr->p_offset == 0) {
+                // 常见场景：首个可加载段偏移为0，可直接通过e_phoff定位程序头
                 uint8_t *elf_addr = (uint8_t*)load_bias_ + phdr->p_vaddr;
                 const Elf_Ehdr* ehdr = (const Elf_Ehdr*)(void*)elf_addr;
                 Elf_Addr  offset = ehdr->e_phoff;
@@ -692,9 +726,11 @@ bool ElfReader::FindPhdr() {
 // Ensures that our program header is actually within a loadable
 // segment. This should help catch badly-formed ELF files that
 // would cause the linker to crash later when trying to access it.
+// 校验程序头表指针范围是否落在可加载段内，避免后续越界访问。
 bool ElfReader::CheckPhdr(uint8_t * loaded) {
     const Elf_Phdr* phdr_limit = phdr_table_ + phdr_num_;
     auto loaded_end = loaded + (phdr_num_ * sizeof(Elf_Phdr));
+    // 保证loaded指针覆盖区间完全落在某个可加载段内
     for (Elf_Phdr* phdr = phdr_table_; phdr < phdr_limit; ++phdr) {
         if (phdr->p_type != PT_LOAD) {
             continue;
@@ -715,6 +751,7 @@ bool ElfReader::CheckPhdr(uint8_t * loaded) {
 }
 
 void ElfReader::ApplyPhdrTable() {
+    // 把修正后的程序头表写回已加载镜像，保证后续重建读取到的是修正值
     const Elf_Phdr* phdr_limit = phdr_table_ + phdr_num_;
     memcpy((void*)loaded_phdr_, (void*)phdr_table_, (uintptr_t)phdr_limit - (uintptr_t)phdr_table_ );
     return ;
@@ -722,6 +759,7 @@ void ElfReader::ApplyPhdrTable() {
 
 
 bool ElfReader::setSource(const char *source) {
+    // 打开输入文件并缓存大小
     name_ = source;
     auto fr = new FileReader(source);
     if (!fr->Open()) {
@@ -734,6 +772,7 @@ bool ElfReader::setSource(const char *source) {
 }
 
 void ElfReader::GetDynamicSection(Elf_Dyn **dynamic, size_t *dynamic_count, Elf_Word *dynamic_flags) {
+    // 与全局版本同逻辑，读取当前实例中的动态段
     auto range_in_load = [this](Elf_Addr start, Elf_Addr size) -> bool {
         if (size == 0) {
             return false;

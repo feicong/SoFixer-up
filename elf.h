@@ -1,7 +1,9 @@
 #ifndef __ELF_H__
 #define __ELF_H__
+/* 文件功能：集中定义ELF规范中的结构体、常量和重定位相关宏。 */
 
 #include <stdint.h>
+/* 说明：该文件主要提供ELF标准结构与常量定义，业务逻辑请参考ElfReader与ElfRebuilder。 */
 /* Standard ELF types.  */
 
 typedef uint8_t	Elf_Byte;

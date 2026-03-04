@@ -4,26 +4,31 @@
 //===----------------------------------------------------------------------===//
 //
 //===----------------------------------------------------------------------===//
+// 文件功能：实现ObElfReader扩展逻辑，处理dump so程序头修复和base so动态段补齐。
 #include "ObElfReader.h"
 
 #include <vector>
 #include <algorithm>
 #include <cstring>
 
+// 修正dump场景下可能失真的程序头信息
 void ObElfReader::FixDumpSoPhdr() {
     // some shell will release data between loadable phdr(s), just load all memory data
     if (dump_so_base_ != 0) {
         std::vector<Elf_Phdr*> loaded_phdrs;
+        // 收集全部可加载段
         for (auto i = 0; i < phdr_num_; i++) {
             auto phdr = &phdr_table_[i];
             if(phdr->p_type != PT_LOAD) continue;
             loaded_phdrs.push_back(phdr);
         }
+        // 按虚拟地址排序，便于推导每段大小
         std::sort(loaded_phdrs.begin(), loaded_phdrs.end(),
                   [](Elf_Phdr * first, Elf_Phdr * second) {
                       return first->p_vaddr < second->p_vaddr;
                   });
         if (!loaded_phdrs.empty()) {
+            // 通过“到下一段起始地址”的方式重算memsz/filesz
             for (unsigned long i = 0, total = loaded_phdrs.size(); i < total; i++) {
                 auto phdr = loaded_phdrs[i];
                 if (i != total - 1) {
@@ -49,6 +54,7 @@ void ObElfReader::FixDumpSoPhdr() {
 
     auto phdr = phdr_table_;
     for(auto i = 0; i < phdr_num_; i++) {
+        // 输出文件按内存镜像布局，偏移与虚拟地址保持一致
         phdr->p_paddr = phdr->p_vaddr;
         phdr->p_filesz = phdr->p_memsz;     // expend filesize to memsiz
         phdr->p_offset = phdr->p_vaddr;     // since elf has been loaded. just expand file data to dump memory data
@@ -57,6 +63,7 @@ void ObElfReader::FixDumpSoPhdr() {
     }
 }
 
+// dump so加载主流程：必要时从base so补动态段
 bool ObElfReader::Load() {
     // try open
     if (!ReadElfHeader() || !VerifyElfHeader() || !ReadProgramHeader())
@@ -85,6 +92,7 @@ bool ObElfReader::Load() {
     }
     if (has_base_dynamic_info) {
         // Copy dynamic information to the end of the file.
+        // 把动态段附加到load区尾部并修正动态phdr
         ApplyDynamicSection();
     }
 
@@ -108,12 +116,14 @@ bool ObElfReader::Load() {
 //    return;
 //}
 
+// 析构函数：释放从base so复制的动态段缓冲
 ObElfReader::~ObElfReader() {
     if (dynamic_sections_ != nullptr) {
         delete [](uint8_t*)dynamic_sections_;
     }
 }
 
+// 从原始base so读取动态段，供dump so缺失动态段时回填
 bool ObElfReader::LoadDynamicSectionFromBaseSource() {
     if (baseso_ == nullptr) {
         return false;
@@ -137,6 +147,7 @@ bool ObElfReader::LoadDynamicSectionFromBaseSource() {
             continue;
         }
 
+        // 复制动态段原始字节到本地缓存
         if (phdr->p_memsz == 0) {
             return false;
         }
@@ -161,6 +172,7 @@ bool ObElfReader::LoadDynamicSectionFromBaseSource() {
     return false;
 }
 
+// 将补充的动态段写入当前镜像末尾并更新动态段程序头
 void ObElfReader::ApplyDynamicSection() {
     if (dynamic_sections_ == nullptr)
         return;
@@ -184,6 +196,7 @@ void ObElfReader::ApplyDynamicSection() {
     }
 }
 
+// 判断PT_DYNAMIC是否完全落在某个PT_LOAD段中
 bool ObElfReader::haveDynamicSectionInLoadableSegment() {
     const Elf_Phdr* phdr = phdr_table_;
     const Elf_Phdr* phdr_limit = phdr + phdr_num_;

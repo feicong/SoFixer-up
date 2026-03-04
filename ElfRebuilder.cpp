@@ -5,6 +5,7 @@
 //===----------------------------------------------------------------------===//
 //
 //===----------------------------------------------------------------------===//
+// 文件功能：实现ELF修复重建流程，包括动态信息提取、节表生成与重定位修正。
 #include <cstdio>
 #include <cstring>
 #include <limits>
@@ -30,6 +31,7 @@
 #endif
 
 namespace {
+// 安全地址加法，失败时返回false
 bool AddElfAddr(Elf_Addr lhs, Elf_Addr rhs, Elf_Addr* out) {
     if (lhs > std::numeric_limits<Elf_Addr>::max() - rhs) {
         return false;
@@ -38,6 +40,7 @@ bool AddElfAddr(Elf_Addr lhs, Elf_Addr rhs, Elf_Addr* out) {
     return true;
 }
 
+// 校验[start,start+size)是否完整位于加载范围内
 bool RangeInLoad(Elf_Addr start, Elf_Addr size, Elf_Addr min_load, Elf_Addr max_load) {
     if (size == 0) {
         return start >= min_load && start <= max_load;
@@ -52,6 +55,7 @@ bool RangeInLoad(Elf_Addr start, Elf_Addr size, Elf_Addr min_load, Elf_Addr max_
     return end >= start && end <= max_load;
 }
 
+// 基于运行时指针计算偏移后，校验指针范围是否合法
 bool PointerInLoad(const uint8_t* base,
                    const void* ptr,
                    size_t size,
@@ -78,6 +82,7 @@ bool PointerInLoad(const uint8_t* base,
                        max_load);
 }
 
+// 校验字符串偏移是否在strtab内且能找到结尾'\0'
 bool StringOffsetValid(const char* strtab, size_t strtab_size, Elf_Word name_off) {
     if (strtab == nullptr || strtab_size == 0) {
         return false;
@@ -90,6 +95,7 @@ bool StringOffsetValid(const char* strtab, size_t strtab_size, Elf_Word name_off
     return terminator != nullptr;
 }
 
+// count*elem_size转换为Elf_Addr字节数，带溢出校验
 bool CountToBytes(size_t count, size_t elem_size, Elf_Addr* out_bytes) {
     if (elem_size == 0) {
         return false;
@@ -105,6 +111,24 @@ bool CountToBytes(size_t count, size_t elem_size, Elf_Addr* out_bytes) {
     return true;
 }
 
+// bytes/elem_size转换为数量，要求整除
+bool BytesToCount(Elf_Addr bytes, size_t elem_size, size_t* out_count) {
+    if (elem_size == 0) {
+        return false;
+    }
+    const auto elem = static_cast<Elf_Addr>(elem_size);
+    if (bytes % elem != 0) {
+        return false;
+    }
+    const auto count = bytes / elem;
+    if (count > static_cast<Elf_Addr>(std::numeric_limits<size_t>::max())) {
+        return false;
+    }
+    *out_count = static_cast<size_t>(count);
+    return true;
+}
+
+// 判断是否为相对重定位类型
 bool IsRelativeRelocType(Elf_Addr type) {
     return type == R_386_RELATIVE ||
            type == R_ARM_RELATIVE ||
@@ -112,6 +136,7 @@ bool IsRelativeRelocType(Elf_Addr type) {
            type == R_AARCH64_RELATIVE;
 }
 
+// 判断是否为导入符号相关重定位类型
 bool IsImportRelocType(Elf_Addr type) {
     return type == R_386_GLOB_DAT ||
            type == R_386_JMP_SLOT ||
@@ -126,16 +151,18 @@ bool IsImportRelocType(Elf_Addr type) {
 }
 }
 
+// 绑定读取器实例
 ElfRebuilder::ElfRebuilder(ObElfReader *elf_reader) {
     elf_reader_ = elf_reader;
 }
 
+// 重写程序头：输出文件偏移直接按已加载内存地址布局
 bool ElfRebuilder::RebuildPhdr() {
     FLOGD("=============LoadDynamicSectionFromBaseSource==========RebuildPhdr=========================");
 
 
     auto phdr = (Elf_Phdr*)elf_reader_->loaded_phdr();
-    for(auto i = 0; i < elf_reader_->phdr_count(); i++) {
+    for (size_t i = 0; i < elf_reader_->phdr_count(); ++i) {
         phdr->p_filesz = phdr->p_memsz;     // expend filesize to memsiz
         // p_paddr and p_align is not used in load, just ignore it.
         // fix file offset.
@@ -147,23 +174,24 @@ bool ElfRebuilder::RebuildPhdr() {
     return true;
 }
 
+// 重建节头表和节名表
 bool ElfRebuilder::RebuildShdr() {
     FLOGD("=======================RebuildShdr=========================");
-    // rebuilding shdr, link information
+    // 重建节头表和节索引关联信息
     auto base = si.load_bias;
     shstrtab.push_back('\0');
 
-    // empty shdr
+    // 0号节：空节
     if(true) {
-        Elf_Shdr shdr = {0};
+        Elf_Shdr shdr = {};
         shdrs.push_back(shdr);
     }
 
-    // gen .dynsym
+    // 生成.dynsym节
     if(si.symtab != nullptr) {
         sDYNSYM = shdrs.size();
 
-        Elf_Shdr shdr;
+        Elf_Shdr shdr = {};
         shdr.sh_name = shstrtab.length();
         shstrtab.append(".dynsym");
         shstrtab.push_back('\0');
@@ -187,11 +215,11 @@ bool ElfRebuilder::RebuildShdr() {
         shdrs.push_back(shdr);
     }
 
-    // gen .dynstr
+    // 生成.dynstr节
     if(si.strtab != nullptr) {
         sDYNSTR = shdrs.size();
 
-        Elf_Shdr shdr;
+        Elf_Shdr shdr = {};
         shdr.sh_name = shstrtab.length();
         shstrtab.append(".dynstr");
         shstrtab.push_back('\0');
@@ -209,16 +237,17 @@ bool ElfRebuilder::RebuildShdr() {
         shdrs.push_back(shdr);
     }
 
-    // gen .hash
+    // 生成.hash节
     if(si.hash != nullptr) {
         sHASH = shdrs.size();
 
-        Elf_Shdr shdr;
+        Elf_Shdr shdr = {};
         shdr.sh_name = shstrtab.length();
         shstrtab.append(".hash");
         shstrtab.push_back('\0');
 
         shdr.sh_type = SHT_HASH;
+        shdr.sh_flags = SHF_ALLOC;
 
         shdr.sh_addr = si.hash - base;
         shdr.sh_offset = shdr.sh_addr;
@@ -244,11 +273,11 @@ bool ElfRebuilder::RebuildShdr() {
         shdrs.push_back(shdr);
     }
 
-    // gen .rel.dyn
+    // 生成.rel.dyn节
     if(si.rel != nullptr) {
         sRELDYN = shdrs.size();
 
-        Elf_Shdr shdr;
+        Elf_Shdr shdr = {};
         shdr.sh_name = shstrtab.length();
         shstrtab.append(".rel.dyn");
         shstrtab.push_back('\0');
@@ -262,7 +291,7 @@ bool ElfRebuilder::RebuildShdr() {
         shdr.sh_info = 0;
 #ifdef __SO64__
         shdr.sh_addralign = 8;
-        shdr.sh_entsize = 0x18;
+        shdr.sh_entsize = sizeof(Elf_Rel);
 #else
         shdr.sh_addralign = 4;
         shdr.sh_entsize = 0x8;
@@ -273,7 +302,7 @@ bool ElfRebuilder::RebuildShdr() {
 
     if (si.plt_rela != nullptr) {
         sRELADYN = shdrs.size();
-        Elf_Shdr shdr;
+        Elf_Shdr shdr = {};
         shdr.sh_name = shstrtab.length();
         shstrtab.append(".rela.dyn");
         shstrtab.push_back('\0');
@@ -292,11 +321,15 @@ bool ElfRebuilder::RebuildShdr() {
         shdr.sh_entsize = sizeof(Elf_Rela);
         shdrs.push_back(shdr);
     }
-    // gen .rel.plt
+    // 生成.rel.plt/.rela.plt节
     if(si.plt_rel != nullptr) {
+        if (si.plt_type != DT_REL && si.plt_type != DT_RELA) {
+            FLOGE("Unsupported plt relocation type: 0x%" ADDRESS_FORMAT "x", static_cast<Elf_Addr>(si.plt_type));
+            return false;
+        }
         sRELPLT = shdrs.size();
 
-        Elf_Shdr shdr;
+        Elf_Shdr shdr = {};
         shdr.sh_name = shstrtab.length();
         if (si.plt_type == DT_REL){
             shstrtab.append(".rel.plt");
@@ -334,11 +367,11 @@ bool ElfRebuilder::RebuildShdr() {
         shdrs.push_back(shdr);
     }
 
-    // gen.plt with .rel.plt
+    // 基于plt重定位区间推导.plt节
     if(si.plt_rel != nullptr) {
         sPLT = shdrs.size();
 
-        Elf_Shdr shdr;
+        Elf_Shdr shdr = {};
         shdr.sh_name = shstrtab.length();
         shstrtab.append(".plt");
         shstrtab.push_back('\0');
@@ -357,11 +390,11 @@ bool ElfRebuilder::RebuildShdr() {
         shdrs.push_back(shdr);
     }
 
-    // gen.text&ARM.extab
+    // 生成.text&ARM.extab节
     if(si.plt_rel != nullptr) {
         sTEXTTAB = shdrs.size();
 
-        Elf_Shdr shdr;
+        Elf_Shdr shdr = {};
         shdr.sh_name = shstrtab.length();
         shstrtab.append(".text&ARM.extab");
         shstrtab.push_back('\0');
@@ -384,11 +417,11 @@ bool ElfRebuilder::RebuildShdr() {
         shdrs.push_back(shdr);
     }
 
-    // gen ARM.exidx
+    // 生成.ARM.exidx节
     if(si.ARM_exidx != nullptr) {
         sARMEXIDX = shdrs.size();
 
-        Elf_Shdr shdr;
+        Elf_Shdr shdr = {};
         shdr.sh_name = shstrtab.length();
         shstrtab.append(".ARM.exidx");
         shstrtab.push_back('\0');
@@ -405,11 +438,11 @@ bool ElfRebuilder::RebuildShdr() {
 
         shdrs.push_back(shdr);
     }
-    // gen .fini_array
+    // 生成.fini_array节
     if(si.fini_array != nullptr) {
         sFINIARRAY = shdrs.size();
 
-        Elf_Shdr shdr;
+        Elf_Shdr shdr = {};
         shdr.sh_name = shstrtab.length();
         shstrtab.append(".fini_array");
         shstrtab.push_back('\0');
@@ -431,11 +464,11 @@ bool ElfRebuilder::RebuildShdr() {
         shdrs.push_back(shdr);
     }
 
-    // gen .init_array
+    // 生成.init_array节
     if(si.init_array != nullptr) {
         sINITARRAY = shdrs.size();
 
-        Elf_Shdr shdr;
+        Elf_Shdr shdr = {};
         shdr.sh_name = shstrtab.length();
         shstrtab.append(".init_array");
         shstrtab.push_back('\0');
@@ -457,11 +490,11 @@ bool ElfRebuilder::RebuildShdr() {
         shdrs.push_back(shdr);
     }
 
-    // gen .dynamic
+    // 生成.dynamic节
     if(si.dynamic != nullptr) {
         sDYNAMIC = shdrs.size();
 
-        Elf_Shdr shdr;
+        Elf_Shdr shdr = {};
         shdr.sh_name = shstrtab.length();
         shstrtab.append(".dynamic");
         shstrtab.push_back('\0');
@@ -484,7 +517,7 @@ bool ElfRebuilder::RebuildShdr() {
         shdrs.push_back(shdr);
     }
 
-    // get .got
+    // 预留.got重建逻辑（当前关闭）
 //    if(si.plt_got != nullptr) {
 //        // global_offset_table
 //        sGOT = shdrs.size();
@@ -517,12 +550,12 @@ bool ElfRebuilder::RebuildShdr() {
 //        shdrs.push_back(shdr);
 //    }
 
-    // gen .data
+    // 生成.data节
     if(true) {
         sDATA = shdrs.size();
         auto sLast = sDATA - 1;
 
-        Elf_Shdr shdr;
+        Elf_Shdr shdr = {};
         shdr.sh_name = shstrtab.length();
         shstrtab.append(".data");
         shstrtab.push_back('\0');
@@ -544,7 +577,7 @@ bool ElfRebuilder::RebuildShdr() {
         shdrs.push_back(shdr);
     }
 
-    // gen .bss
+    // 预留.bss重建逻辑（当前关闭）
 //    if(true) {
 //        sBSS = shdrs.size();
 //
@@ -566,11 +599,11 @@ bool ElfRebuilder::RebuildShdr() {
 //        shdrs.push_back(shdr);
 //    }
 
-    // gen .shstrtab, pad into last data
+    // 生成.shstrtab节并拼接到load区尾部
     if(true) {
         sSHSTRTAB = shdrs.size();
 
-        Elf_Shdr shdr;
+        Elf_Shdr shdr = {};
         shdr.sh_name = shstrtab.length();
         shstrtab.append(".shstrtab");
         shstrtab.push_back('\0');
@@ -588,11 +621,11 @@ bool ElfRebuilder::RebuildShdr() {
         shdrs.push_back(shdr);
     }
 
-    // link section data
+    // 修复节之间的链接关系
 
-    // sort shdr and recalc size
-    for(auto i = 1; i < shdrs.size(); i++) {
-        for(auto j = i + 1; j < shdrs.size(); j++) {
+    // 按地址排序节头并同步修正内部索引
+    for (size_t i = 1; i < shdrs.size(); ++i) {
+        for (size_t j = i + 1; j < shdrs.size(); ++j) {
             if(shdrs[i].sh_addr > shdrs[j].sh_addr) {
                 // exchange i, j
                 auto tmp = shdrs[i];
@@ -601,10 +634,10 @@ bool ElfRebuilder::RebuildShdr() {
 
                 // exchange index
                 auto chgIdx = [i, j](Elf_Word &t) {
-                    if(t == i) {
-                        t = j;
-                    } else if(t == j) {
-                        t = i;
+                    if (t == static_cast<Elf_Word>(i)) {
+                        t = static_cast<Elf_Word>(j);
+                    } else if (t == static_cast<Elf_Word>(j)) {
+                        t = static_cast<Elf_Word>(i);
                     }
                 };
                 chgIdx(sDYNSYM);
@@ -666,8 +699,8 @@ bool ElfRebuilder::RebuildShdr() {
         shdrs[sTEXTTAB].sh_size = shdrs[sNext].sh_addr - shdrs[sTEXTTAB].sh_addr;
     }
 
-    // fix for size
-    for(auto i = 2; i < shdrs.size(); i++) {
+    // 纠正可能的节大小重叠
+    for (size_t i = 2; i < shdrs.size(); ++i) {
         if(shdrs[i].sh_offset - shdrs[i-1].sh_offset < shdrs[i-1].sh_size) {
             shdrs[i-1].sh_size = shdrs[i].sh_offset - shdrs[i-1].sh_offset;
         }
@@ -677,6 +710,7 @@ bool ElfRebuilder::RebuildShdr() {
     return true;
 }
 
+// 重建主流程：先修phdr，再读so信息，最后构造节表/重定位/输出
 bool ElfRebuilder::Rebuild() {
     return RebuildPhdr() &&
            ReadSoInfo() &&
@@ -685,6 +719,7 @@ bool ElfRebuilder::Rebuild() {
            RebuildFin();
 }
 
+// 从动态段提取重建所需信息，并做完整边界与一致性校验
 bool ElfRebuilder::ReadSoInfo() {
     FLOGD("=======================ReadSoInfo=========================");
     si.base = si.load_bias = elf_reader_->load_bias();
@@ -715,9 +750,9 @@ bool ElfRebuilder::ReadSoInfo() {
     phdr_table_get_arm_exidx(si.phdr, si.phnum, si.base,
                              &si.ARM_exidx, (unsigned*)&si.ARM_exidx_count);
 
-    // Extract useful information from dynamic section.
+    // 从动态段收集关键元数据，先记录地址和值，后续统一做范围校验后再转指针
     uint32_t needed_count = 0;
-    size_t plt_rel_size_bytes = 0;
+    Elf_Addr plt_rel_size_bytes = 0;
     Elf_Addr strtab_addr = 0;
     bool has_strtab = false;
     Elf_Addr symtab_addr = 0;
@@ -740,6 +775,12 @@ bool ElfRebuilder::ReadSoInfo() {
     bool has_fini_array = false;
     Elf_Addr preinit_array_addr = 0;
     bool has_preinit_array = false;
+    Elf_Addr syment = 0;
+    bool has_syment = false;
+    Elf_Addr relent = 0;
+    bool has_relent = false;
+    Elf_Addr relaent = 0;
+    bool has_relaent = false;
     Elf_Word soname_off = 0;
     bool has_soname = false;
     for (size_t dyn_idx = 0; dyn_idx < si.dynamic_count; ++dyn_idx) {
@@ -747,6 +788,7 @@ bool ElfRebuilder::ReadSoInfo() {
         if (d->d_tag == DT_NULL) {
             break;
         }
+        // 第一阶段：只解析动态条目的原始值
         switch(d->d_tag){
             case DT_HASH: {
                 Elf_Addr hash_addr = d->d_un.d_ptr;
@@ -799,7 +841,10 @@ bool ElfRebuilder::ReadSoInfo() {
                 FLOGD("%s rel (DT_REL) found at %" ADDRESS_FORMAT "x", si.name, d->d_un.d_ptr);
                 break;
             case DT_RELSZ:
-                si.rel_count = d->d_un.d_val / sizeof(Elf_Rel);
+                if (!BytesToCount(d->d_un.d_val, sizeof(Elf_Rel), &si.rel_count)) {
+                    FLOGE("Invalid DT_RELSZ alignment");
+                    return false;
+                }
                 FLOGD("%s rel_size (DT_RELSZ) %zu", si.name, si.rel_count);
                 break;
             case DT_PLTGOT:
@@ -816,7 +861,10 @@ bool ElfRebuilder::ReadSoInfo() {
                 has_rela = true;
                 break;
             case DT_RELASZ:
-                si.plt_rela_count = d->d_un.d_val / sizeof(Elf_Rela);
+                if (!BytesToCount(d->d_un.d_val, sizeof(Elf_Rela), &si.plt_rela_count)) {
+                    FLOGE("Invalid DT_RELASZ alignment");
+                    return false;
+                }
                 break;
             case DT_INIT:
                 init_addr = d->d_un.d_ptr;
@@ -834,7 +882,10 @@ bool ElfRebuilder::ReadSoInfo() {
                 FLOGD("%s constructors (DT_INIT_ARRAY) found at %" ADDRESS_FORMAT "x", si.name, d->d_un.d_ptr);
                 break;
             case DT_INIT_ARRAYSZ:
-                si.init_array_count = ((unsigned)d->d_un.d_val) / sizeof(Elf_Addr);
+                if (!BytesToCount(d->d_un.d_val, sizeof(Elf_Addr), &si.init_array_count)) {
+                    FLOGE("Invalid DT_INIT_ARRAYSZ alignment");
+                    return false;
+                }
                 FLOGD("%s constructors (DT_INIT_ARRAYSZ) %zu", si.name, si.init_array_count);
                 break;
             case DT_FINI_ARRAY:
@@ -843,7 +894,10 @@ bool ElfRebuilder::ReadSoInfo() {
                 FLOGD("%s destructors (DT_FINI_ARRAY) found at %" ADDRESS_FORMAT "x", si.name, d->d_un.d_ptr);
                 break;
             case DT_FINI_ARRAYSZ:
-                si.fini_array_count = ((unsigned)d->d_un.d_val) / sizeof(Elf_Addr);
+                if (!BytesToCount(d->d_un.d_val, sizeof(Elf_Addr), &si.fini_array_count)) {
+                    FLOGE("Invalid DT_FINI_ARRAYSZ alignment");
+                    return false;
+                }
                 FLOGD("%s destructors (DT_FINI_ARRAYSZ) %zu", si.name, si.fini_array_count);
                 break;
             case DT_PREINIT_ARRAY:
@@ -852,7 +906,10 @@ bool ElfRebuilder::ReadSoInfo() {
                 FLOGD("%s constructors (DT_PREINIT_ARRAY) found at %" ADDRESS_FORMAT "x", si.name, d->d_un.d_ptr);
                 break;
             case DT_PREINIT_ARRAYSZ:
-                si.preinit_array_count = ((unsigned)d->d_un.d_val) / sizeof(Elf_Addr);
+                if (!BytesToCount(d->d_un.d_val, sizeof(Elf_Addr), &si.preinit_array_count)) {
+                    FLOGE("Invalid DT_PREINIT_ARRAYSZ alignment");
+                    return false;
+                }
                 FLOGD("%s constructors (DT_PREINIT_ARRAYSZ) %zu", si.name, si.preinit_array_count);
                 break;
             case DT_TEXTREL:
@@ -876,7 +933,16 @@ bool ElfRebuilder::ReadSoInfo() {
                 si.strtabsize = d->d_un.d_val;
                 break;
             case DT_SYMENT:
+                syment = d->d_un.d_val;
+                has_syment = true;
+                break;
             case DT_RELENT:
+                relent = d->d_un.d_val;
+                has_relent = true;
+                break;
+            case DT_RELAENT:
+                relaent = d->d_un.d_val;
+                has_relaent = true;
                 break;
             case DT_MIPS_RLD_MAP:
                 // Set the DT_MIPS_RLD_MAP entry to the address of _r_debug for GDB.
@@ -908,6 +974,7 @@ bool ElfRebuilder::ReadSoInfo() {
         }
     }
     if (has_strtab) {
+        // 第二阶段：统一做范围校验后再转成可访问指针
         if (si.strtabsize == 0 ||
             si.strtabsize > static_cast<size_t>(std::numeric_limits<Elf_Addr>::max()) ||
             !RangeInLoad(strtab_addr,
@@ -991,11 +1058,33 @@ bool ElfRebuilder::ReadSoInfo() {
             FLOGW("Ignore invalid DT_SONAME offset");
         }
     }
+    if (has_syment && syment != sizeof(Elf_Sym)) {
+        FLOGE("Unsupported DT_SYMENT: %" ADDRESS_FORMAT "u", syment);
+        return false;
+    }
+    if (has_relent && relent != sizeof(Elf_Rel)) {
+        FLOGE("Unsupported DT_RELENT: %" ADDRESS_FORMAT "u", relent);
+        return false;
+    }
+    if (has_relaent && relaent != sizeof(Elf_Rela)) {
+        FLOGE("Unsupported DT_RELAENT: %" ADDRESS_FORMAT "u", relaent);
+        return false;
+    }
+    if ((has_jmprel || plt_rel_size_bytes != 0) && si.plt_type != DT_REL && si.plt_type != DT_RELA) {
+        FLOGE("Unsupported DT_PLTREL type: 0x%" ADDRESS_FORMAT "x", static_cast<Elf_Addr>(si.plt_type));
+        return false;
+    }
     if (plt_rel_size_bytes != 0) {
         if (si.plt_type == DT_RELA) {
-            si.plt_rel_count = plt_rel_size_bytes / sizeof(Elf_Rela);
+            if (!BytesToCount(plt_rel_size_bytes, sizeof(Elf_Rela), &si.plt_rel_count)) {
+                FLOGE("Invalid DT_PLTRELSZ alignment for RELA");
+                return false;
+            }
         } else if (si.plt_type == DT_REL) {
-            si.plt_rel_count = plt_rel_size_bytes / sizeof(Elf_Rel);
+            if (!BytesToCount(plt_rel_size_bytes, sizeof(Elf_Rel), &si.plt_rel_count)) {
+                FLOGE("Invalid DT_PLTRELSZ alignment for REL");
+                return false;
+            }
         } else {
             FLOGE("Unsupported DT_PLTREL type: 0x%" ADDRESS_FORMAT "x", static_cast<Elf_Addr>(si.plt_type));
             return false;
@@ -1003,6 +1092,7 @@ bool ElfRebuilder::ReadSoInfo() {
         FLOGD("%s plt_rel_count (DT_PLTRELSZ) %zu", si.name, si.plt_rel_count);
     }
     if (si.rel_count != 0) {
+        // 仅在声明了有效数量时要求对应地址存在且范围完整
         if (!has_rel) {
             FLOGE("DT_RELSZ found but DT_REL missing");
             return false;
@@ -1022,6 +1112,7 @@ bool ElfRebuilder::ReadSoInfo() {
         si.rel = reinterpret_cast<Elf_Rel*>(base + rel_addr);
     }
     if (si.plt_rela_count != 0) {
+        // 同步校验RELA主重定位表
         if (!has_rela) {
             FLOGE("DT_RELASZ found but DT_RELA missing");
             return false;
@@ -1041,6 +1132,7 @@ bool ElfRebuilder::ReadSoInfo() {
         si.plt_rela = reinterpret_cast<Elf_Rela*>(base + rela_addr);
     }
     if (si.plt_rel_count != 0) {
+        // 校验PLT重定位条目类型、长度和范围
         if (!has_jmprel) {
             FLOGE("DT_PLTRELSZ found but DT_JMPREL missing");
             return false;
@@ -1073,7 +1165,7 @@ bool ElfRebuilder::ReadSoInfo() {
     return true;
 }
 
-// Finally, generate rebuild_data
+// 组装最终重建产物：加载段数据 + .shstrtab + section header table
 bool ElfRebuilder::RebuildFin() {
     FLOGD("=======================try to finish file rebuild =========================");
     if (si.max_load < si.min_load) {
@@ -1127,6 +1219,7 @@ bool ElfRebuilder::RebuildFin() {
 }
 
 template <bool isRela>
+// 按重定位类型修正地址：相对重定位直接减dump_base，导入重定位映射到导入槽
 void ElfRebuilder::relocate(uint8_t * base, Elf_Rel* rel, Elf_Addr dump_base) {
     if(rel == nullptr) return ;
     if (si.max_load < sizeof(Elf_Addr)) return;
@@ -1230,6 +1323,7 @@ void ElfRebuilder::relocate(uint8_t * base, Elf_Rel* rel, Elf_Addr dump_base) {
     }
 };
 
+// 按符号索引查询导入槽位，不存在返回-1
 int ElfRebuilder::GetImportSlotBySymIndex(size_t symIndex) const {
     auto it = mImportSymIndexToImportSlot.find(symIndex);
     if (it == mImportSymIndexToImportSlot.end()) {
@@ -1240,6 +1334,7 @@ int ElfRebuilder::GetImportSlotBySymIndex(size_t symIndex) const {
 
 
 //将导入表的符号按顺序保存在 std::vector<std::string>  mImports; 中，以便后面获得导入符号序号 
+// 扫描重定位使用到的符号索引，建立符号索引->导入槽位映射
 void ElfRebuilder::SaveImportsymNames(){
     mImports.clear();
     mImportSymIndexToImportSlot.clear();
@@ -1324,6 +1419,7 @@ void ElfRebuilder::SaveImportsymNames(){
 }
 
 
+// 按收集到的重定位表逐项修复内容
 bool ElfRebuilder::RebuildRelocs() {
 
     FLOGD("=======================Save_importsym_names=========================");

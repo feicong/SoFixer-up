@@ -5,12 +5,14 @@
 //===----------------------------------------------------------------------===//
 //
 //===----------------------------------------------------------------------===//
+// 文件功能：定义与目标位数相关的ELF类型别名和页对齐辅助宏。
 
 #ifndef FAOATDUMP_EXELF_H
 #define FAOATDUMP_EXELF_H
 
 #include "elf.h"
 
+// 根据编译位数统一类型别名，简化业务代码中的类型分支
 #ifndef __SO64__
 typedef Elf32_Ehdr Elf_Ehdr;
 typedef Elf32_Phdr Elf_Phdr;
@@ -38,19 +40,24 @@ typedef Elf64_Word Elf_Word;
 #ifndef PAGE_SIZE
 #define PAGE_SIZE 0x1000
 
+// 页掩码
 #define PAGE_MASK (~(PAGE_SIZE-1))
 // Returns the address of the page containing address 'x'.
+// 取地址x所在页的起始地址
 #define PAGE_START(x)  ((x) & PAGE_MASK)
 
 // Returns the offset of address 'x' in its page.
+// 取地址x在页内的偏移
 #define PAGE_OFFSET(x) ((x) & ~PAGE_MASK)
 
 // Returns the address of the next page after address 'x', unless 'x' is
 // itself at the start of a page.
+// 取包含地址x的末尾页边界（向上按页对齐）
 #define PAGE_END(x)    PAGE_START((x) + (PAGE_SIZE-1))
 #endif
 
 #ifndef TEMP_FAILURE_RETRY
+// 系统调用在EINTR时自动重试
 #define TEMP_FAILURE_RETRY(expression) \
   (__extension__\
    ({ long int __result;\
