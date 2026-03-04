@@ -723,14 +723,16 @@ bool ElfRebuilder::ReadSoInfo() {
 bool ElfRebuilder::RebuildFin() {
     FLOGD("=======================try to finish file rebuild =========================");
     auto load_size = si.max_load - si.min_load;
-    rebuild_size = load_size + shstrtab.length() +
+    auto file_load_end = si.max_load;
+    rebuild_size = file_load_end + shstrtab.length() +
                    shdrs.size() * sizeof(Elf_Shdr);
     rebuild_data = new uint8_t[rebuild_size];
-    memcpy(rebuild_data, (void*)si.load_bias, load_size);
+    memset(rebuild_data, 0, rebuild_size);
+    memcpy(rebuild_data + si.min_load, (void*)(si.load_bias + si.min_load), load_size);
     // pad with shstrtab
-    memcpy(rebuild_data + load_size, shstrtab.c_str(), shstrtab.length());
+    memcpy(rebuild_data + file_load_end, shstrtab.c_str(), shstrtab.length());
     // pad with shdrs
-    auto shdr_off = load_size + shstrtab.length();
+    auto shdr_off = file_load_end + shstrtab.length();
     memcpy(rebuild_data + (int)shdr_off, (void*)&shdrs[0],
            shdrs.size() * sizeof(Elf_Shdr));
     auto ehdr = *elf_reader_->record_ehdr();
@@ -747,6 +749,8 @@ bool ElfRebuilder::RebuildFin() {
 template <bool isRela>
 void ElfRebuilder::relocate(uint8_t * base, Elf_Rel* rel, Elf_Addr dump_base) {
     if(rel == nullptr) return ;
+    if (rel->r_offset < si.min_load) return;
+    if (rel->r_offset > si.max_load - sizeof(Elf_Addr)) return;
 #ifndef __SO64__
     auto type = ELF32_R_TYPE(rel->r_info);
     auto sym = ELF32_R_SYM(rel->r_info);
@@ -769,20 +773,27 @@ void ElfRebuilder::relocate(uint8_t * base, Elf_Rel* rel, Elf_Addr dump_base) {
         case R_ARM_JUMP_SLOT:
         case 0x401: //看到也有该type的重定位信息，其中也是导入表相关内容，所以这里也加上
         case 0x402:{
+            size_t symtab_count_hint = si.nchain;
+            if (si.mips_symtabno > symtab_count_hint) {
+                symtab_count_hint = si.mips_symtabno;
+            }
+            if (symtab_count_hint != 0 && sym >= symtab_count_hint) {
+                break;
+            }
             auto syminfo = si.symtab[sym];
             if (syminfo.st_value != 0) {
                 *prel = syminfo.st_value;
             } else {
-              auto load_size = si.max_load - si.min_load;
+              auto import_base = si.max_load;
               if (mImports.size() == 0){
-                *prel = load_size + external_pointer;
+                *prel = import_base + external_pointer;
                 external_pointer += sizeof(*prel);
               }else{ //这里如果获取了导入符号内容，并且不为空，则从保存的导入符号数组中获取导入表索引值
                 int nIndex = GetImportSlotBySymIndex(sym);
                 if (nIndex != -1){
-                  *prel = load_size + nIndex*sizeof(*prel);
+                  *prel = import_base + nIndex*sizeof(*prel);
                 } else {
-                  *prel = load_size + external_pointer;
+                  *prel = import_base + external_pointer;
                   external_pointer += sizeof(*prel);
                 }
 //                FLOGD("type:0x%x offset:0x%x -- symname:%s nIndex:%d\r\n", type, rel->r_offset, symname, nIndex);
