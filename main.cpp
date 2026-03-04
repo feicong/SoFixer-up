@@ -4,6 +4,7 @@
 #include "FDebug.h"
 #include <getopt.h>
 #include <stdio.h>
+#include <cstring>
 
 #ifdef __SO64__
 #define TARGET_NAME "SoFixer64"
@@ -46,19 +47,21 @@ bool main_loop(int argc, char* argv[]) {
                 baseso = optarg;
                 break;
             case 'm': {
-                auto is16Bit = [](const char* c) {
-                    auto len = strlen(c);
-                    if(len > 2) {
-                        if(c[0] == '0' & c[1] == 'x') return true;
+                auto is16Bit = [](const char* value) {
+                    if (value == nullptr || *value == '\0') {
+                        return false;
                     }
-                    bool is10bit = true;
-                    for(auto i = 0; i < len; i++) {
-                        if((c[i] > 'a' && c[i] < 'f') ||
-                           (c[i] > 'A' && c[i] < 'F')) {
-                            is10bit = false;
+                    auto len = strlen(value);
+                    if (len > 2 && value[0] == '0' && (value[1] == 'x' || value[1] == 'X')) {
+                        return true;
+                    }
+                    for (size_t i = 0; i < len; i++) {
+                        if ((value[i] >= 'a' && value[i] <= 'f') ||
+                            (value[i] >= 'A' && value[i] <= 'F')) {
+                            return true;
                         }
                     }
-                    return !is10bit;
+                    return false;
                 };
 #ifndef __SO64__
                 auto base = strtoul(optarg, 0, is16Bit(optarg) ? 16: 10);
@@ -72,17 +75,6 @@ bool main_loop(int argc, char* argv[]) {
                 return false;
         }
     }
-
-    auto file = fopen(source.c_str(), "rb");
-    if(nullptr == file) {
-        FLOGE("source so file cannot found!!!");
-        return false;
-    }
-#ifdef __LARGE64_FILES
-    auto fd = file->_file;
-#else
-    auto fd = fileno(file);
-#endif
 
     FLOGI("start to rebuild elf file");
     if (!elf_reader.setSource(source.c_str())) {
@@ -103,10 +95,9 @@ bool main_loop(int argc, char* argv[]) {
         FLOGE("error occured in rebuilding elf file");
         return false;
     }
-    fclose(file);
 
     if (!output.empty()) {
-        file = fopen(output.c_str(), "wb+");
+        auto* file = fopen(output.c_str(), "wb+");
         if(nullptr == file) {
             FLOGE("output so file cannot write !!!");
             return false;
