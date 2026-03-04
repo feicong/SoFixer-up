@@ -47,25 +47,25 @@ jobs:
           if (!(Test-Path $src)) {
             throw "windows binary not found"
           }
-          Copy-Item $src "$env:GITHUB_WORKSPACE/dist/SoFixer-windows-latest-64.exe"
+          Copy-Item $src "$env:GITHUB_WORKSPACE/dist/SoFixer-windows-latest.exe"
         } elseif ("${{ matrix.os }}" -eq "macos-latest") {
           $src = "$env:GITHUB_WORKSPACE/build/SoFixer64"
           if (!(Test-Path $src)) {
             throw "macos binary not found"
           }
-          Copy-Item $src "$env:GITHUB_WORKSPACE/dist/SoFixer-macos-latest-64"
+          Copy-Item $src "$env:GITHUB_WORKSPACE/dist/SoFixer-macos-latest"
         } else {
           $src = "$env:GITHUB_WORKSPACE/build/SoFixer64"
           if (!(Test-Path $src)) {
             throw "ubuntu binary not found"
           }
-          Copy-Item $src "$env:GITHUB_WORKSPACE/dist/SoFixer-ubuntu-latest-64"
+          Copy-Item $src "$env:GITHUB_WORKSPACE/dist/SoFixer-ubuntu-latest"
         }
 
     - name: Upload native artifact
       uses: actions/upload-artifact@v6
       with:
-        name: SoFixer-${{ matrix.os }}-64
+        name: SoFixer-${{ matrix.os }}
         path: ${{ github.workspace }}/dist/SoFixer-*
         if-no-files-found: error
 
@@ -97,13 +97,13 @@ jobs:
     - name: Prepare Android binary
       run: |
         mkdir -p ${{ github.workspace }}/dist
-        cp ${{ github.workspace }}/build-android-arm64/SoFixer64 ${{ github.workspace }}/dist/SoFixer-android-arm64-64
+        cp ${{ github.workspace }}/build-android-arm64/SoFixer64 ${{ github.workspace }}/dist/SoFixer-android-arm64
 
     - name: Upload Android artifact
       uses: actions/upload-artifact@v6
       with:
         name: SoFixer-Android-arm64
-        path: ${{ github.workspace }}/dist/SoFixer-android-arm64-64
+        path: ${{ github.workspace }}/dist/SoFixer-android-arm64
         if-no-files-found: error
 
   publish_latest:
